@@ -1,0 +1,18 @@
+# Delivery Checklist
+- [ ] Dedicated Application Pool (`01-setup-iis.ps1`)
+- [ ] SQL login `ElearningApp` (not sa) (`sql/01-setup-production.sql`)
+- [ ] Connection string from env var (`DB_CONNECTION`)
+- [ ] HTTPS + SSL working (`02-setup-ssl.ps1`)
+- [ ] Custom domain bound
+- [ ] HSTS + secure headers (`SecurityHeadersMiddleware.cs`)
+- [ ] SSL Labs grade A  (screenshot)
+- [ ] Minimum file permissions (`icacls` in setup script)
+- [ ] Serilog active (File + SQL + Seq)
+- [ ] Custom error pages 404/403/500
+- [ ] Daily backup running (`schedule-tasks.ps1`) + off-site sync
+- [ ] Successful restore test (`restore-test.ps1`, log line SUCCESS)
+- [ ] `deploy.ps1` works incl. rollback demo
+- [ ] Health checks live (`/health/ready`)
+- [ ] Application Insights working
+- [ ] Alerts created (`azure-alerts.ps1`)
+- [ ] Runbook (`docs/RUNBOOK.md`)

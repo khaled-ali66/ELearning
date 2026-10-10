@@ -1,0 +1,94 @@
+// Packages:
+// dotnet add package Serilog.AspNetCore
+// dotnet add package Serilog.Sinks.File
+// dotnet add package Serilog.Sinks.MSSqlServer
+// dotnet add package Serilog.Sinks.Seq
+// dotnet add package Serilog.Enrichers.Environment
+// dotnet add package Microsoft.ApplicationInsights.AspNetCore
+// dotnet add package AspNetCore.HealthChecks.SqlServer
+// dotnet add package AspNetCore.HealthChecks.System
+using System.Text.Json;
+using HealthChecks.UI.Client; // optional
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Serilog;
+using Serilog.Events;
+using Serilog.Sinks.MSSqlServer;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Connection string: env var first (set on the App Pool), then config
+var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION")
+    ?? builder.Configuration.GetConnectionString("Default")!;
+
+// ---- Serilog: Console + rolling File + SQL + Seq ----
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+    .MinimumLevel.Override("Microsoft.EntityFrameworkCore", LogEventLevel.Warning)
+    .Enrich.FromLogContext().Enrich.WithMachineName().Enrich.WithEnvironmentName()
+    .WriteTo.Console()
+    .WriteTo.File("logs/elearning-.log", rollingInterval: RollingInterval.Day, retainedFileCountLimit: 30)
+    .WriteTo.MSSqlServer(connectionString,
+        new MSSqlServerSinkOptions { TableName = "Logs", AutoCreateSqlTable = true, BatchPostingLimit = 100 },
+        restrictedToMinimumLevel: LogEventLevel.Warning)
+    .WriteTo.Seq(builder.Configuration["Seq:Url"] ?? "http://localhost:5341")
+    .CreateLogger();
+builder.Host.UseSerilog();
+
+builder.Services.AddControllersWithViews();
+builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlServer(connectionString, s =>
+{
+    s.EnableRetryOnFailure(5, TimeSpan.FromSeconds(10), null);
+    s.CommandTimeout(60);
+}));
+
+// ---- HTTPS / HSTS ----
+builder.Services.AddHsts(o => { o.MaxAge = TimeSpan.FromDays(365); o.IncludeSubDomains = true; o.Preload = true; });
+
+// ---- Application Insights ----
+builder.Services.AddApplicationInsightsTelemetry(o =>
+    o.ConnectionString = builder.Configuration["ApplicationInsights:ConnectionString"]);
+
+// ---- Health checks ----
+builder.Services.AddHealthChecks()
+    .AddSqlServer(connectionString, name: "sql-server", failureStatus: HealthStatus.Unhealthy, tags: new[] { "ready" })
+    .AddDiskStorageHealthCheck(s => s.AddDrive("C:\\", 1024), name: "disk-space", tags: new[] { "ready" })
+    .AddProcessAllocatedMemoryHealthCheck(1024, name: "memory");
+
+var app = builder.Build();
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Error/global");   // Global exception handler
+    app.UseHsts();                              // before redirection
+}
+app.UseStatusCodePagesWithReExecute("/Error/{0}");
+app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseHttpsRedirection();
+app.UseSerilogRequestLogging();
+app.UseStaticFiles();
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });      // liveness
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = c => c.Tags.Contains("ready") }); // readiness
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = async (ctx, report) =>
+    {
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.WriteAsync(JsonSerializer.Serialize(new
+        {
+            status = report.Status.ToString(),
+            duration = report.TotalDuration,
+            checks = report.Entries.Select(e => new { name = e.Key, status = e.Value.Status.ToString() })
+        }));
+    }
+});
+
+try { app.Run(); }
+catch (Exception ex) { Log.Fatal(ex, "Host terminated unexpectedly"); throw; }
+finally { Log.CloseAndFlush(); }
